@@ -1349,6 +1349,54 @@ export default class RequestHandler {
     res.json(config);
   }
 
+  async periodicRecentGet(
+    req: express.Request,
+    res: express.Response
+  ): Promise<void> {
+    const [period, err] = this.periodicGetInterface(req.params.period);
+    if (err) {
+      this.returnCannedResponse(res, { errorCode: err });
+      return;
+    }
+
+    const limit = parseInt(req.query.limit as string) || 5;
+    const includeContent = req.query.includeContent === "true";
+
+    // Get all periodic notes
+    const allNotes = period!.getAll();
+    const noteEntries = Object.entries(allNotes);
+
+    // Sort by modification time (most recent first)
+    noteEntries.sort((a, b) => b[1].stat.mtime - a[1].stat.mtime);
+
+    // Take the most recent ones
+    const recentNotes = noteEntries.slice(0, limit);
+
+    // Build response
+    const result = await Promise.all(
+      recentNotes.map(async ([dateKey, file]) => {
+        const item: {
+          path: string;
+          date: string;
+          mtime: number;
+          content?: string;
+        } = {
+          path: file.path,
+          date: dateKey,
+          mtime: file.stat.mtime,
+        };
+
+        if (includeContent) {
+          item.content = await this.app.vault.read(file);
+        }
+
+        return item;
+      })
+    );
+
+    res.json(result);
+  }
+
   async activeFileGet(
     req: express.Request,
     res: express.Response
@@ -1794,6 +1842,9 @@ export default class RequestHandler {
       .delete(this.vaultDelete.bind(this));
 
     this.api.route("/periodic/config/").get(this.periodicConfigGet.bind(this));
+    this.api
+      .route("/periodic/:period/recent/")
+      .get(this.periodicRecentGet.bind(this));
 
     this.api
       .route("/periodic/:period/")
