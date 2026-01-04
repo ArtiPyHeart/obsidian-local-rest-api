@@ -38,5 +38,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish to PyPI
+        if: ${{ secrets.PYPI_TOKEN != '' }}
         working-directory: mcp/obsidian-mcp
         run: uv publish --token ${{ secrets.PYPI_TOKEN }}
+        continue-on-error: true
