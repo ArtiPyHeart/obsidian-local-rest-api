@@ -1327,6 +1327,28 @@ export default class RequestHandler {
     );
   }
 
+  async periodicConfigGet(
+    req: express.Request,
+    res: express.Response
+  ): Promise<void> {
+    const periodic = this.getPeriodicNoteInterface();
+    const config: Record<
+      string,
+      { enabled: boolean; folder: string; format: string; template: string }
+    > = {};
+
+    for (const [period, iface] of Object.entries(periodic)) {
+      config[period] = {
+        enabled: iface.loaded,
+        folder: iface.settings.folder || "",
+        format: iface.settings.format || "",
+        template: iface.settings.template || "",
+      };
+    }
+
+    res.json(config);
+  }
+
   async activeFileGet(
     req: express.Request,
     res: express.Response
@@ -1770,6 +1792,8 @@ export default class RequestHandler {
       .patch(this.vaultPatch.bind(this))
       .post(this.vaultPost.bind(this))
       .delete(this.vaultDelete.bind(this));
+
+    this.api.route("/periodic/config/").get(this.periodicConfigGet.bind(this));
 
     this.api
       .route("/periodic/:period/")
