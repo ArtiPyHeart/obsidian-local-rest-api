@@ -1,0 +1,42 @@
+name: Release MCP Package
+
+on:
+  push:
+    tags:
+      - 'mcp-v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Get version from tag
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/mcp-v}" >> $GITHUB_OUTPUT
+
+      - name: Build package
+        working-directory: mcp/obsidian-mcp
+        run: uv build
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: "obsidian-api-mcp v${{ steps.version.outputs.version }}"
+          files: |
+            mcp/obsidian-mcp/dist/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish to PyPI
+        working-directory: mcp/obsidian-mcp
+        run: uv publish --token ${{ secrets.PYPI_TOKEN }}

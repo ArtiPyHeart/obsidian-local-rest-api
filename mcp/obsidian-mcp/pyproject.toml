@@ -1,0 +1,46 @@
+[project]
+name = "obsidian-api-mcp"
+version = "0.1.2"
+description = "MCP server for Obsidian with full Canvas support"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+    { name = "ArtiPyHeart", email = "wwwyqy618@gmail.com" }
+]
+keywords = ["mcp", "obsidian", "canvas", "claude", "ai", "llm"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+    "mcp>=1.1.0",
+    "httpx>=0.27.0",
+    "python-dotenv>=1.0.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/ArtiPyHeart/obsidian-local-rest-api"
+Repository = "https://github.com/ArtiPyHeart/obsidian-local-rest-api"
+
+[project.scripts]
+obsidian-mcp = "obsidian_mcp:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/obsidian_mcp"]
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.389",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
