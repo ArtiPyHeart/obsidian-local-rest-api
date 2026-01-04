@@ -45,6 +45,27 @@ export const ERROR_CODE_MESSAGES: Record<ErrorCode, string> = {
   [ErrorCode.InvalidSearch]: "The search query you provided is not valid.",
   [ErrorCode.ErrorPreparingSimpleSearch]:
     "Error encountered while calling Obsidian `prepareSimpleSearch` API.",
+  // Canvas error messages
+  [ErrorCode.InvalidCanvasFormat]:
+    "The canvas JSON structure is invalid.",
+  [ErrorCode.CanvasNodeNotFound]:
+    "The specified canvas node was not found.",
+  [ErrorCode.CanvasEdgeNotFound]:
+    "The specified canvas edge was not found.",
+  [ErrorCode.InvalidCanvasPatchOperation]:
+    "The canvas patch operation is invalid. Valid operations are: add, update, delete.",
+  [ErrorCode.InvalidCanvasPatchTargetType]:
+    "The canvas patch target type is invalid. Valid types are: node, edge, nodes, edges.",
+  [ErrorCode.CanvasNodeIdRequired]:
+    "A node ID is required for this operation.",
+  [ErrorCode.CanvasEdgeIdRequired]:
+    "An edge ID is required for this operation.",
+  [ErrorCode.CanvasNodeIdConflict]:
+    "A node with this ID already exists.",
+  [ErrorCode.CanvasEdgeIdConflict]:
+    "An edge with this ID already exists.",
+  [ErrorCode.CanvasEdgeReferencesInvalidNode]:
+    "The edge references a node that does not exist.",
 };
 
 export enum ContentTypes {
@@ -53,6 +74,8 @@ export enum ContentTypes {
   olrapiNoteJson = "application/vnd.olrapi.note+json",
   jsonLogic = "application/vnd.olrapi.jsonlogic+json",
   dataviewDql = "application/vnd.olrapi.dataview.dql+txt",
+  canvasJson = "application/vnd.olrapi.canvas+json",
+  canvasPatchJson = "application/vnd.olrapi.canvas.patch+json",
 }
 
 export const DefaultBearerTokenHeaderName = "Authorization";

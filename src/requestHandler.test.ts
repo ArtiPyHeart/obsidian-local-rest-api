@@ -802,4 +802,261 @@ describe("requestHandler", () => {
         .expect(401);
     });
   });
+
+  describe("canvasGet", () => {
+    test("file content", async () => {
+      const canvasPath = "test.canvas";
+      const canvasData = JSON.stringify({
+        nodes: [{ id: "n1", type: "text", x: 0, y: 0, width: 200, height: 100, text: "Hello" }],
+        edges: [] as unknown[],
+      });
+      const fileContentBuffer = new ArrayBuffer(canvasData.length);
+      const fileContentBufferView = new Uint8Array(fileContentBuffer);
+      for (let i = 0; i < canvasData.length; i++) {
+        fileContentBufferView[i] = canvasData.charCodeAt(i);
+      }
+
+      app.vault.adapter._readBinary = fileContentBuffer;
+
+      const result = await request(server)
+        .get(`/vault/${canvasPath}`)
+        .set("Authorization", `Bearer ${API_KEY}`)
+        .expect(200);
+
+      expect(result.header["content-type"]).toContain("application/json");
+      const body = JSON.parse(result.text);
+      expect(body.nodes).toHaveLength(1);
+      expect(body.nodes[0].type).toEqual("text");
+    });
+
+    test("canvas with metadata accept header", async () => {
+      const canvasPath = "test.canvas";
+      const canvasData = JSON.stringify({
+        nodes: [
+          { id: "n1", type: "text", x: 0, y: 0, width: 200, height: 100, text: "Hello" },
+          { id: "n2", type: "file", x: 300, y: 0, width: 200, height: 100, file: "test.md" },
+        ],
+        edges: [{ id: "e1", fromNode: "n1", toNode: "n2" }],
+      });
+
+      const canvasFile = new TFile();
+      canvasFile.path = canvasPath;
+      app.vault._getAbstractFileByPath = canvasFile;
+      app.vault._cachedRead = canvasData;
+
+      const result = await request(server)
+        .get(`/vault/${canvasPath}`)
+        .set("Authorization", `Bearer ${API_KEY}`)
+        .set("Accept", "application/vnd.olrapi.canvas+json")
+        .expect(200);
+
+      expect(result.body.canvas).toBeDefined();
+      expect(result.body.metadata).toBeDefined();
+      expect(result.body.metadata.nodeCount).toEqual(2);
+      expect(result.body.metadata.edgeCount).toEqual(1);
+      expect(result.body.metadata.nodeTypes.text).toEqual(1);
+      expect(result.body.metadata.nodeTypes.file).toEqual(1);
+      expect(result.body.metadata.referencedFiles).toContain("test.md");
+    });
+  });
+
+  describe("canvasPut", () => {
+    test("valid canvas structure", async () => {
+      const canvasPath = "test.canvas";
+      const canvasData = {
+        nodes: [{ id: "n1", type: "text", x: 0, y: 0, width: 200, height: 100, text: "Hello" }],
+        edges: [] as unknown[],
+      };
+
+      await request(server)
+        .put(`/vault/${canvasPath}`)
+        .set("Authorization", `Bearer ${API_KEY}`)
+        .set("Content-Type", "application/json")
+        .send(canvasData)
+        .expect(204);
+
+      expect(app.vault.adapter._write[0]).toEqual(canvasPath);
+    });
+
+    test("invalid canvas structure - missing node id", async () => {
+      const canvasPath = "test.canvas";
+      const canvasData = {
+        nodes: [{ type: "text", x: 0, y: 0, width: 200, height: 100, text: "Hello" }],
+        edges: [] as unknown[],
+      };
+
+      await request(server)
+        .put(`/vault/${canvasPath}`)
+        .set("Authorization", `Bearer ${API_KEY}`)
+        .set("Content-Type", "application/json")
+        .send(canvasData)
+        .expect(400);
+    });
+
+    test("invalid canvas structure - invalid node type", async () => {
+      const canvasPath = "test.canvas";
+      const canvasData = {
+        nodes: [{ id: "n1", type: "invalid", x: 0, y: 0, width: 200, height: 100 }],
+        edges: [] as unknown[],
+      };
+
+      await request(server)
+        .put(`/vault/${canvasPath}`)
+        .set("Authorization", `Bearer ${API_KEY}`)
+        .set("Content-Type", "application/json")
+        .send(canvasData)
+        .expect(400);
+    });
+  });
+
+  describe("canvasPatch", () => {
+    const validCanvas = {
+      nodes: [
+        { id: "n1", type: "text", x: 0, y: 0, width: 200, height: 100, text: "Hello" },
+        { id: "n2", type: "text", x: 300, y: 0, width: 200, height: 100, text: "World" },
+      ],
+      edges: [{ id: "e1", fromNode: "n1", toNode: "n2" }],
+    };
+
+    beforeEach(() => {
+      const canvasFile = new TFile();
+      canvasFile.path = "test.canvas";
+      app.vault._getAbstractFileByPath = canvasFile;
+      app.vault._read = JSON.stringify(validCanvas);
+    });
+
+    test("add node", async () => {
+      const canvasPath = "test.canvas";
+      const newNode = { id: "n3", type: "text", x: 600, y: 0, width: 200, height: 100, text: "New" };
+
+      const result = await request(server)
+        .patch(`/vault/${canvasPath}`)
+        .set("Authorization", `Bearer ${API_KEY}`)
+        .set("Content-Type", "application/vnd.olrapi.canvas.patch+json")
+        .set("Target-Type", "node")
+        .set("Operation", "add")
+        .send(newNode)
+        .expect(200);
+
+      expect(result.body.nodes).toHaveLength(3);
+      expect(result.body.nodes.some((n: any) => n.id === "n3")).toBe(true);
+    });
+
+    test("update node", async () => {
+      const canvasPath = "test.canvas";
+      const updateData = { text: "Updated" };
+
+      const result = await request(server)
+        .patch(`/vault/${canvasPath}`)
+        .set("Authorization", `Bearer ${API_KEY}`)
+        .set("Content-Type", "application/vnd.olrapi.canvas.patch+json")
+        .set("Target-Type", "node")
+        .set("Operation", "update")
+        .set("Target", "n1")
+        .send(updateData)
+        .expect(200);
+
+      const updatedNode = result.body.nodes.find((n: any) => n.id === "n1");
+      expect(updatedNode.text).toEqual("Updated");
+    });
+
+    test("delete node", async () => {
+      const canvasPath = "test.canvas";
+
+      const result = await request(server)
+        .patch(`/vault/${canvasPath}`)
+        .set("Authorization", `Bearer ${API_KEY}`)
+        .set("Content-Type", "application/vnd.olrapi.canvas.patch+json")
+        .set("Target-Type", "node")
+        .set("Operation", "delete")
+        .set("Target", "n1")
+        .send({})
+        .expect(200);
+
+      expect(result.body.nodes).toHaveLength(1);
+      expect(result.body.nodes.some((n: any) => n.id === "n1")).toBe(false);
+      // Edge referencing deleted node should also be removed
+      expect(result.body.edges).toHaveLength(0);
+    });
+
+    test("add edge", async () => {
+      const canvasPath = "test.canvas";
+      const newEdge = { id: "e2", fromNode: "n2", toNode: "n1" };
+
+      const result = await request(server)
+        .patch(`/vault/${canvasPath}`)
+        .set("Authorization", `Bearer ${API_KEY}`)
+        .set("Content-Type", "application/vnd.olrapi.canvas.patch+json")
+        .set("Target-Type", "edge")
+        .set("Operation", "add")
+        .send(newEdge)
+        .expect(200);
+
+      expect(result.body.edges).toHaveLength(2);
+    });
+
+    test("batch operations on nodes", async () => {
+      const canvasPath = "test.canvas";
+      const batchOps = {
+        add: [{ id: "n3", type: "text", x: 600, y: 0, width: 200, height: 100, text: "New" }],
+        update: { n1: { text: "Updated" } },
+        delete: ["n2"],
+      };
+
+      const result = await request(server)
+        .patch(`/vault/${canvasPath}`)
+        .set("Authorization", `Bearer ${API_KEY}`)
+        .set("Content-Type", "application/vnd.olrapi.canvas.patch+json")
+        .set("Target-Type", "nodes")
+        .send(batchOps)
+        .expect(200);
+
+      // Should have n1 (updated) and n3 (added), but not n2 (deleted)
+      expect(result.body.nodes).toHaveLength(2);
+      expect(result.body.nodes.some((n: any) => n.id === "n1" && n.text === "Updated")).toBe(true);
+      expect(result.body.nodes.some((n: any) => n.id === "n3")).toBe(true);
+      expect(result.body.nodes.some((n: any) => n.id === "n2")).toBe(false);
+    });
+
+    test("error - node id conflict", async () => {
+      const canvasPath = "test.canvas";
+      const duplicateNode = { id: "n1", type: "text", x: 600, y: 0, width: 200, height: 100, text: "Dup" };
+
+      await request(server)
+        .patch(`/vault/${canvasPath}`)
+        .set("Authorization", `Bearer ${API_KEY}`)
+        .set("Content-Type", "application/vnd.olrapi.canvas.patch+json")
+        .set("Target-Type", "node")
+        .set("Operation", "add")
+        .send(duplicateNode)
+        .expect(409);
+    });
+
+    test("error - node not found for update", async () => {
+      const canvasPath = "test.canvas";
+
+      await request(server)
+        .patch(`/vault/${canvasPath}`)
+        .set("Authorization", `Bearer ${API_KEY}`)
+        .set("Content-Type", "application/vnd.olrapi.canvas.patch+json")
+        .set("Target-Type", "node")
+        .set("Operation", "update")
+        .set("Target", "nonexistent")
+        .send({ text: "Updated" })
+        .expect(404);
+    });
+
+    test("error - invalid target type", async () => {
+      const canvasPath = "test.canvas";
+
+      await request(server)
+        .patch(`/vault/${canvasPath}`)
+        .set("Authorization", `Bearer ${API_KEY}`)
+        .set("Content-Type", "application/vnd.olrapi.canvas.patch+json")
+        .set("Target-Type", "invalid")
+        .set("Operation", "add")
+        .send({})
+        .expect(400);
+    });
+  });
 });

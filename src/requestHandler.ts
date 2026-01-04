@@ -32,6 +32,15 @@ import {
 
 import {
   CannedResponse,
+  CanvasBatchPatch,
+  CanvasData,
+  CanvasEdge,
+  CanvasMetadataObject,
+  CanvasNode,
+  CanvasPatchOperation,
+  CanvasPatchTargetType,
+  CanvasSearchContext,
+  CanvasSearchResponseItem,
   ErrorCode,
   ErrorResponseDescriptor,
   FileMetadataObject,
@@ -48,6 +57,15 @@ import {
   getSplicePosition,
   toArrayBuffer,
 } from "./utils";
+import {
+  getCanvasMetadata,
+  getTextFromCanvasNodes,
+  isCanvasFile,
+  parseCanvasData,
+  validateCanvasEdge,
+  validateCanvasNode,
+  validateCanvasStructure,
+} from "./canvasUtils";
 import {
   CERT_NAME,
   ContentTypes,
@@ -205,6 +223,12 @@ export default class RequestHandler {
     };
   }
 
+  async getCanvasMetadataObject(file: TFile): Promise<CanvasMetadataObject> {
+    const content = await this.app.vault.cachedRead(file);
+    const canvas = parseCanvasData(content);
+    return getCanvasMetadata(canvas, file.path, file.stat);
+  }
+
   getResponseMessage({
     statusCode = 400,
     message,
@@ -309,14 +333,19 @@ export default class RequestHandler {
 
       if (exists && (await this.app.vault.adapter.stat(path)).type === "file") {
         const content = await this.app.vault.adapter.readBinary(path);
-        const mimeType = mime.lookup(path);
+        let mimeType: string | false = mime.lookup(path);
+
+        // Default canvas files to application/json
+        if (!mimeType && isCanvasFile(path)) {
+          mimeType = "application/json";
+        }
 
         res.set({
           "Content-Disposition": `attachment; filename="${encodeURI(
             path
           ).replace(",", "%2C")}"`,
           "Content-Type":
-            `${mimeType}` +
+            `${mimeType || "application/octet-stream"}` +
             (mimeType == ContentTypes.markdown ? "; charset=utf-8" : ""),
         });
 
@@ -326,6 +355,25 @@ export default class RequestHandler {
           res.send(
             JSON.stringify(await this.getFileMetadataObject(file), null, 2)
           );
+          return;
+        }
+
+        // Handle canvas files with metadata
+        if (
+          isCanvasFile(path) &&
+          req.headers.accept === ContentTypes.canvasJson
+        ) {
+          const file = this.app.vault.getAbstractFileByPath(path) as TFile;
+          try {
+            const metadata = await this.getCanvasMetadataObject(file);
+            res.setHeader("Content-Type", ContentTypes.canvasJson);
+            res.send(JSON.stringify(metadata, null, 2));
+          } catch (e) {
+            this.returnCannedResponse(res, {
+              errorCode: ErrorCode.InvalidCanvasFormat,
+              message: e.message,
+            });
+          }
           return;
         }
 
@@ -363,6 +411,25 @@ export default class RequestHandler {
       await this.app.vault.createFolder(path.dirname(filepath));
     } catch {
       // the folder/file already exists, but we don't care
+    }
+
+    // Handle canvas files with JSON validation
+    if (isCanvasFile(filepath) && typeof req.body === "object") {
+      try {
+        validateCanvasStructure(req.body);
+        await this.app.vault.adapter.write(
+          filepath,
+          JSON.stringify(req.body, null, 2)
+        );
+        this.returnCannedResponse(res, { statusCode: 204 });
+        return;
+      } catch (e) {
+        this.returnCannedResponse(res, {
+          errorCode: ErrorCode.InvalidCanvasFormat,
+          message: e.message,
+        });
+        return;
+      }
     }
 
     if (typeof req.body === "string") {
@@ -576,10 +643,379 @@ export default class RequestHandler {
       return;
     }
 
+    // Route canvas files to canvas-specific handler
+    const contentType = req.get("Content-Type");
+    if (isCanvasFile(path) && contentType === ContentTypes.canvasPatchJson) {
+      return this._canvasPatch(path, req, res);
+    }
+
     if (req.get("Heading") && !req.get("Target-Type")) {
       return this._vaultPatchV2(path, req, res);
     }
     return this._vaultPatchV3(path, req, res);
+  }
+
+  async _canvasPatch(
+    path: string,
+    req: express.Request,
+    res: express.Response
+  ): Promise<void> {
+    const targetType = req.get("Target-Type") as CanvasPatchTargetType;
+    const operation = req.get("Operation") as CanvasPatchOperation;
+    const target = req.get("Target")
+      ? decodeURIComponent(req.get("Target"))
+      : undefined;
+
+    // Validate headers
+    if (!targetType) {
+      this.returnCannedResponse(res, {
+        errorCode: ErrorCode.MissingTargetTypeHeader,
+      });
+      return;
+    }
+
+    if (!["node", "edge", "nodes", "edges"].includes(targetType)) {
+      this.returnCannedResponse(res, {
+        errorCode: ErrorCode.InvalidCanvasPatchTargetType,
+      });
+      return;
+    }
+
+    // For single operations, operation header is required
+    if ((targetType === "node" || targetType === "edge") && !operation) {
+      this.returnCannedResponse(res, {
+        errorCode: ErrorCode.MissingOperation,
+      });
+      return;
+    }
+
+    if (operation && !["add", "update", "delete"].includes(operation)) {
+      this.returnCannedResponse(res, {
+        errorCode: ErrorCode.InvalidCanvasPatchOperation,
+      });
+      return;
+    }
+
+    // Read existing canvas
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) {
+      this.returnCannedResponse(res, { statusCode: 404 });
+      return;
+    }
+
+    let canvas: CanvasData;
+    try {
+      const content = await this.app.vault.read(file);
+      canvas = parseCanvasData(content);
+    } catch (e) {
+      this.returnCannedResponse(res, {
+        errorCode: ErrorCode.InvalidCanvasFormat,
+        message: e.message,
+      });
+      return;
+    }
+
+    try {
+      // Handle batch operations
+      if (targetType === "nodes") {
+        canvas = this.applyCanvasNodesBatch(
+          canvas,
+          req.body as CanvasBatchPatch<CanvasNode>
+        );
+      } else if (targetType === "edges") {
+        canvas = this.applyCanvasEdgesBatch(
+          canvas,
+          req.body as CanvasBatchPatch<CanvasEdge>
+        );
+      }
+      // Handle single operations
+      else if (targetType === "node") {
+        canvas = this.applyCanvasNodeOperation(
+          canvas,
+          operation,
+          target,
+          req.body
+        );
+      } else if (targetType === "edge") {
+        canvas = this.applyCanvasEdgeOperation(
+          canvas,
+          operation,
+          target,
+          req.body
+        );
+      }
+
+      // Validate the result
+      validateCanvasStructure(canvas);
+
+      // Write back
+      const newContent = JSON.stringify(canvas, null, 2);
+      await this.app.vault.adapter.write(path, newContent);
+
+      res.status(200).json(canvas);
+    } catch (e) {
+      if (e.errorCode) {
+        this.returnCannedResponse(res, {
+          errorCode: e.errorCode,
+          message: e.message,
+        });
+      } else {
+        this.returnCannedResponse(res, {
+          errorCode: ErrorCode.PatchFailed,
+          message: e.message,
+        });
+      }
+    }
+  }
+
+  applyCanvasNodesBatch(
+    canvas: CanvasData,
+    batch: CanvasBatchPatch<CanvasNode>
+  ): CanvasData {
+    const result = {
+      ...canvas,
+      nodes: [...canvas.nodes],
+      edges: [...canvas.edges],
+    };
+
+    // Process deletions first
+    if (batch.delete) {
+      const deleteSet = new Set(batch.delete);
+      result.nodes = result.nodes.filter((n) => !deleteSet.has(n.id));
+      // Also remove edges that reference deleted nodes
+      result.edges = result.edges.filter(
+        (e) => !deleteSet.has(e.fromNode) && !deleteSet.has(e.toNode)
+      );
+    }
+
+    // Process updates
+    if (batch.update) {
+      for (const [id, updates] of Object.entries(batch.update)) {
+        const idx = result.nodes.findIndex((n) => n.id === id);
+        if (idx === -1) {
+          const error = new Error(`Node ${id} not found`);
+          (error as any).errorCode = ErrorCode.CanvasNodeNotFound;
+          throw error;
+        }
+        result.nodes[idx] = { ...result.nodes[idx], ...updates } as CanvasNode;
+      }
+    }
+
+    // Process additions
+    if (batch.add) {
+      const existingIds = new Set(result.nodes.map((n) => n.id));
+      for (const node of batch.add) {
+        if (existingIds.has(node.id)) {
+          const error = new Error(`Node ${node.id} already exists`);
+          (error as any).errorCode = ErrorCode.CanvasNodeIdConflict;
+          throw error;
+        }
+        validateCanvasNode(node);
+        result.nodes.push(node);
+      }
+    }
+
+    return result;
+  }
+
+  applyCanvasEdgesBatch(
+    canvas: CanvasData,
+    batch: CanvasBatchPatch<CanvasEdge>
+  ): CanvasData {
+    const result = {
+      ...canvas,
+      nodes: [...canvas.nodes],
+      edges: [...canvas.edges],
+    };
+    const nodeIds = new Set(result.nodes.map((n) => n.id));
+
+    // Process deletions first
+    if (batch.delete) {
+      const deleteSet = new Set(batch.delete);
+      result.edges = result.edges.filter((e) => !deleteSet.has(e.id));
+    }
+
+    // Process updates
+    if (batch.update) {
+      for (const [id, updates] of Object.entries(batch.update)) {
+        const idx = result.edges.findIndex((e) => e.id === id);
+        if (idx === -1) {
+          const error = new Error(`Edge ${id} not found`);
+          (error as any).errorCode = ErrorCode.CanvasEdgeNotFound;
+          throw error;
+        }
+        const updated = { ...result.edges[idx], ...updates } as CanvasEdge;
+        // Validate node references
+        if (!nodeIds.has(updated.fromNode) || !nodeIds.has(updated.toNode)) {
+          const error = new Error(`Edge references non-existent node`);
+          (error as any).errorCode = ErrorCode.CanvasEdgeReferencesInvalidNode;
+          throw error;
+        }
+        result.edges[idx] = updated;
+      }
+    }
+
+    // Process additions
+    if (batch.add) {
+      const existingIds = new Set(result.edges.map((e) => e.id));
+      for (const edge of batch.add) {
+        if (existingIds.has(edge.id)) {
+          const error = new Error(`Edge ${edge.id} already exists`);
+          (error as any).errorCode = ErrorCode.CanvasEdgeIdConflict;
+          throw error;
+        }
+        if (!nodeIds.has(edge.fromNode) || !nodeIds.has(edge.toNode)) {
+          const error = new Error(`Edge references non-existent node`);
+          (error as any).errorCode = ErrorCode.CanvasEdgeReferencesInvalidNode;
+          throw error;
+        }
+        validateCanvasEdge(edge);
+        result.edges.push(edge);
+      }
+    }
+
+    return result;
+  }
+
+  applyCanvasNodeOperation(
+    canvas: CanvasData,
+    operation: CanvasPatchOperation,
+    target: string | undefined,
+    body: unknown
+  ): CanvasData {
+    const result = {
+      ...canvas,
+      nodes: [...canvas.nodes],
+      edges: [...canvas.edges],
+    };
+
+    switch (operation) {
+      case "add": {
+        const newNode = body as CanvasNode;
+        validateCanvasNode(newNode);
+        if (result.nodes.some((n) => n.id === newNode.id)) {
+          const error = new Error(`Node ${newNode.id} already exists`);
+          (error as any).errorCode = ErrorCode.CanvasNodeIdConflict;
+          throw error;
+        }
+        result.nodes.push(newNode);
+        break;
+      }
+
+      case "update": {
+        if (!target) {
+          const error = new Error("Target node ID required");
+          (error as any).errorCode = ErrorCode.CanvasNodeIdRequired;
+          throw error;
+        }
+        const updateIdx = result.nodes.findIndex((n) => n.id === target);
+        if (updateIdx === -1) {
+          const error = new Error(`Node ${target} not found`);
+          (error as any).errorCode = ErrorCode.CanvasNodeNotFound;
+          throw error;
+        }
+        result.nodes[updateIdx] = {
+          ...result.nodes[updateIdx],
+          ...(body as Partial<CanvasNode>),
+        } as CanvasNode;
+        break;
+      }
+
+      case "delete": {
+        if (!target) {
+          const error = new Error("Target node ID required");
+          (error as any).errorCode = ErrorCode.CanvasNodeIdRequired;
+          throw error;
+        }
+        const deleteIdx = result.nodes.findIndex((n) => n.id === target);
+        if (deleteIdx === -1) {
+          const error = new Error(`Node ${target} not found`);
+          (error as any).errorCode = ErrorCode.CanvasNodeNotFound;
+          throw error;
+        }
+        result.nodes.splice(deleteIdx, 1);
+        // Remove edges referencing this node
+        result.edges = result.edges.filter(
+          (e) => e.fromNode !== target && e.toNode !== target
+        );
+        break;
+      }
+    }
+
+    return result;
+  }
+
+  applyCanvasEdgeOperation(
+    canvas: CanvasData,
+    operation: CanvasPatchOperation,
+    target: string | undefined,
+    body: unknown
+  ): CanvasData {
+    const result = {
+      ...canvas,
+      nodes: [...canvas.nodes],
+      edges: [...canvas.edges],
+    };
+    const nodeIds = new Set(result.nodes.map((n) => n.id));
+
+    switch (operation) {
+      case "add": {
+        const newEdge = body as CanvasEdge;
+        validateCanvasEdge(newEdge);
+        if (result.edges.some((e) => e.id === newEdge.id)) {
+          const error = new Error(`Edge ${newEdge.id} already exists`);
+          (error as any).errorCode = ErrorCode.CanvasEdgeIdConflict;
+          throw error;
+        }
+        if (!nodeIds.has(newEdge.fromNode) || !nodeIds.has(newEdge.toNode)) {
+          const error = new Error(`Edge references non-existent node`);
+          (error as any).errorCode = ErrorCode.CanvasEdgeReferencesInvalidNode;
+          throw error;
+        }
+        result.edges.push(newEdge);
+        break;
+      }
+
+      case "update": {
+        if (!target) {
+          const error = new Error("Target edge ID required");
+          (error as any).errorCode = ErrorCode.CanvasEdgeIdRequired;
+          throw error;
+        }
+        const updateIdx = result.edges.findIndex((e) => e.id === target);
+        if (updateIdx === -1) {
+          const error = new Error(`Edge ${target} not found`);
+          (error as any).errorCode = ErrorCode.CanvasEdgeNotFound;
+          throw error;
+        }
+        const updated = { ...result.edges[updateIdx], ...(body as Partial<CanvasEdge>) } as CanvasEdge;
+        if (!nodeIds.has(updated.fromNode) || !nodeIds.has(updated.toNode)) {
+          const error = new Error(`Edge references non-existent node`);
+          (error as any).errorCode = ErrorCode.CanvasEdgeReferencesInvalidNode;
+          throw error;
+        }
+        result.edges[updateIdx] = updated;
+        break;
+      }
+
+      case "delete": {
+        if (!target) {
+          const error = new Error("Target edge ID required");
+          (error as any).errorCode = ErrorCode.CanvasEdgeIdRequired;
+          throw error;
+        }
+        const deleteIdx = result.edges.findIndex((e) => e.id === target);
+        if (deleteIdx === -1) {
+          const error = new Error(`Edge ${target} not found`);
+          (error as any).errorCode = ErrorCode.CanvasEdgeNotFound;
+          throw error;
+        }
+        result.edges.splice(deleteIdx, 1);
+        break;
+      }
+    }
+
+    return result;
   }
 
   async vaultPatch(req: express.Request, res: express.Response): Promise<void> {
@@ -988,7 +1424,7 @@ export default class RequestHandler {
     req: express.Request,
     res: express.Response
   ): Promise<void> {
-    const results: SearchResponseItem[] = [];
+    const results: (SearchResponseItem | CanvasSearchResponseItem)[] = [];
 
     const query: string = req.query.query as string;
     if (!(typeof query === "string")) {
@@ -1010,6 +1446,7 @@ export default class RequestHandler {
       });
     }
 
+    // Search markdown files
     for (const file of this.app.vault.getMarkdownFiles()) {
       const cachedContents = await this.app.vault.cachedRead(file);
       const result = search(cachedContents);
@@ -1033,6 +1470,58 @@ export default class RequestHandler {
           score: result.score,
           matches: contextMatches,
         });
+      }
+    }
+
+    // Search canvas files
+    for (const file of this.app.vault.getFiles()) {
+      if (!isCanvasFile(file.path)) {
+        continue;
+      }
+
+      try {
+        const content = await this.app.vault.cachedRead(file);
+        const canvasData = parseCanvasData(content);
+        const contextMatches: CanvasSearchContext[] = [];
+        let bestScore = 0;
+
+        // Search through text nodes
+        for (const node of canvasData.nodes) {
+          if (node.type === "text") {
+            const result = search(node.text);
+            if (result) {
+              if (result.score > bestScore) {
+                bestScore = result.score;
+              }
+              for (const match of result.matches) {
+                contextMatches.push({
+                  match: {
+                    start: match[0],
+                    end: match[1],
+                  },
+                  context: node.text.slice(
+                    Math.max(match[0] - contextLength, 0),
+                    match[1] + contextLength
+                  ),
+                  nodeId: node.id,
+                  nodeType: "text",
+                });
+              }
+            }
+          }
+        }
+
+        if (contextMatches.length > 0) {
+          results.push({
+            filename: file.path,
+            score: bestScore,
+            matches: contextMatches,
+            isCanvas: true,
+          });
+        }
+      } catch (e) {
+        // Skip invalid canvas files
+        console.error(`Error searching canvas file ${file.path}: ${e}`);
       }
     }
 
@@ -1243,6 +1732,20 @@ export default class RequestHandler {
     this.api.use(
       bodyParser.json({
         type: ContentTypes.jsonLogic,
+        strict: false,
+        limit: MaximumRequestSize,
+      })
+    );
+    this.api.use(
+      bodyParser.json({
+        type: ContentTypes.canvasJson,
+        strict: false,
+        limit: MaximumRequestSize,
+      })
+    );
+    this.api.use(
+      bodyParser.json({
+        type: ContentTypes.canvasPatchJson,
         strict: false,
         limit: MaximumRequestSize,
       })
